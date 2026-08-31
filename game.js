@@ -1,5 +1,5 @@
-// DARKSIDE - main game script
-// Open index.html in a modern browser. Uses Canvas & SVG sprites.
+// DARKSIDE - main game script (updated: replay button, start/boost buttons, top-only enemy spawn + entrance animation)
+// Keep all existing visual assets (SVG spacecrafts, nebula, stars).
 
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d', { alpha: false });
@@ -25,9 +25,15 @@ const hudEnergy = document.getElementById('energy');
 const radarCanvas = document.getElementById('radar');
 const radarCtx = radarCanvas.getContext('2d');
 
+const overlay = document.getElementById('overlay');
+const gameoverEl = document.getElementById('gameover');
+const gameoverScoreEl = document.getElementById('gameover-score');
+const replayBtn = document.getElementById('replay-btn');
+const startBtn = document.getElementById('start-btn');
+const boostBtn = document.getElementById('boost-btn');
+
 let running = false;
 let lastTime = now();
-let accum = 0;
 let seed = Math.random()*9999;
 
 // Game state
@@ -48,7 +54,7 @@ const state = {
   difficultyTimer: 0,
   level: 1,
   startTime: now(),
-  mouse: { x: 0, y: 0, down: false },
+  mouse: { x: 0, y: 0, down: false, moved: false },
 };
 
 // Create starfield
@@ -68,7 +74,7 @@ function initStars(){
 }
 initStars();
 
-// SVG sprite generator: player and 3 enemy types (as strings)
+// SVG sprite generator: player and 3 enemy types (as strings) - unchanged
 function playerSVG(){
   return `
   <svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
@@ -122,7 +128,6 @@ function playerSVG(){
 }
 
 function enemySVG(type){
-  // 3 types: scout, fighter, cruiser
   if(type==='scout'){
     return `
     <svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160">
@@ -209,9 +214,9 @@ async function loadSprites(){
     cruiser: await svgToImage(enemySVG('cruiser')),
   };
 }
-loadSprites().then(()=> start());
+loadSprites().then(()=> initUI());
 
-// Audio (WebAudio synth)
+// Audio (WebAudio synth) - unchanged
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function playShot(){
   if(!audioCtx) return;
@@ -253,53 +258,51 @@ function playExplosion(){
 function createPlayer(){
   const p = {
     x: state.w/2,
-    y: state.h/2,
+    y: state.h * 0.78,     // keep player low on screen by default
     r: 20,
-    rotation: 0,
+    rotation: -Math.PI/2,  // face upward by default
+    baseSpeed: 260,
     speed: 260,
     recoil:0,
     fireCooldown: 0,
     hp: 100,
     energy: 100,
-    radarRadius: Math.min(state.w, state.h) * 0.24,
+    radarRadius: Math.min(state.w, state.h) * 0.25,
     revealTime: 900,
-    lastShot: 0
+    lastShot: 0,
+    boosting: false,
+    boostEnd: 0
   };
   state.player = p;
 }
 createPlayer();
 
 function spawnEnemy(){
-  // Determine type by probability influenced by score
+  // Only spawn from the top of the screen (y negative)
   const s = state.score;
-  const types = ['scout','fighter','cruiser'];
-  let t;
   const p = Math.random();
+  let t;
   if(p < 0.5) t = 'scout';
   else if(p < 0.85) t = 'fighter';
   else t = 'cruiser';
 
-  // spawn from random edge
-  const edge = Math.floor(Math.random()*4);
-  let x,y;
-  if(edge===0){ x = -60; y = Math.random()*state.h; }
-  if(edge===1){ x = state.w + 60; y = Math.random()*state.h; }
-  if(edge===2){ x = Math.random()*state.w; y = -60; }
-  if(edge===3){ x = Math.random()*state.w; y = state.h + 60; }
+  // horizontal spawn position (slightly inset)
+  const margin = 60;
+  const x = rand(margin, state.w - margin);
+  const startY = -rand(120, 420); // above screen, varied depths for "deep space" feel
+  // initial downward speed (will be applied after entrance)
+  let speed = t==='scout' ? rand(120,200) : t==='fighter' ? rand(80,140) : rand(40,90);
+  speed *= 1 + (state.level-1)*0.08;
 
-  // velocity towards player + some variance
-  const angle = Math.atan2(state.player.y - y, state.player.x - x) + rand(-0.2,0.2);
-  let speed = t==='scout' ? rand(140,260) : t==='fighter' ? rand(80,150) : rand(40,90);
-  // scale speed by level
-  speed *= 1 + (state.level-1)*0.1;
-  const vx = Math.cos(angle)*speed;
-  const vy = Math.sin(angle)*speed;
-
+  // create enemy with entrance animation metadata
   const enemy = {
     id: Math.random().toString(36).slice(2,10),
     type: t,
-    x,y,vx,vy,
-    rot: angle,
+    x: x,
+    y: startY,
+    vx: rand(-30,30), // slight horizontal drift while descending
+    vy: speed,
+    rot: Math.PI/2, // face downward initially
     sprite: enemySprites[t],
     size: t==='scout' ? 28 : t==='fighter' ? 48 : 86,
     hp: t==='scout' ? 12 : t==='fighter' ? 30 : 95,
@@ -308,6 +311,12 @@ function spawnEnemy(){
     revealed: false,
     revealUntil: 0,
     flashing: 0,
+    // entrance properties
+    enterStart: now(),
+    enterDuration: rand(700,1400),
+    enterFromY: startY,
+    enterTargetY: rand(30, Math.max(80, state.h * 0.34)), // they come down into the top region first
+    entering: true
   };
   state.enemies.push(enemy);
 }
@@ -328,9 +337,54 @@ canvas.addEventListener('mousemove', e=>{
   const rect = canvas.getBoundingClientRect();
   state.mouse.x = (e.clientX - rect.left);
   state.mouse.y = (e.clientY - rect.top);
+  state.mouse.moved = true;
 });
-canvas.addEventListener('mousedown', e=>{ state.mouse.down = true; });
+canvas.addEventListener('mousedown', e=>{ state.mouse.down = true; state.mouse.moved = true; });
 canvas.addEventListener('mouseup', e=>{ state.mouse.down = false; });
+
+// UI wiring
+function initUI(){
+  // Start button: starts or restarts
+  startBtn.addEventListener('click', ()=>{
+    // user gesture will also unlock audio
+    if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    restart();
+  });
+
+  // Boost button: triggers temporary boost
+  boostBtn.addEventListener('click', ()=>{
+    activateBoost();
+  });
+
+  // Replay button: visible on game over
+  replayBtn.addEventListener('click', ()=>{
+    restart();
+  });
+
+  // initialize game after sprites loaded
+  lastTime = now();
+  running = false;
+  // keep overlay visible initially (Start is available)
+  overlay.style.display = 'block';
+  gameoverEl.setAttribute('aria-hidden', 'true');
+
+  // start a light update loop to allow initial overlay
+  requestAnimationFrame(loop);
+}
+
+// Boost activation
+function activateBoost(){
+  const p = state.player;
+  if(!p) return;
+  const nowt = now();
+  // only allow boost if we have energy
+  if(state.energy > 12){
+    p.boosting = true;
+    p.boostEnd = nowt + 1400; // 1.4s boost
+    // user gesture will resume audio if needed
+    if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  }
+}
 
 // Game loop
 function start(){
@@ -347,12 +401,13 @@ function loop(){
   if(dt > 0.06) dt = 0.06;
   update(dt);
   render();
-  if(running) requestAnimationFrame(loop);
+  requestAnimationFrame(loop);
 }
 
 // Update
 function update(dt){
   const p = state.player;
+  if(!p) return;
 
   // background stars update
   for(let s of state.stars){
@@ -373,16 +428,44 @@ function update(dt){
   if(keys['d'] || keys['arrowright']) dx += 1;
   const mag = Math.hypot(dx,dy) || 1;
   dx /= mag; dy /= mag;
+
+  // Boost handling
+  if(p.boosting && now() < p.boostEnd && state.energy > 4){
+    p.speed = p.baseSpeed * 1.9;
+    state.energy = clamp(state.energy - dt*18, 0, 100);
+  } else {
+    p.boosting = false;
+    p.speed = p.baseSpeed;
+  }
+
   p.vx = dx * p.speed;
   p.vy = dy * p.speed;
   p.x += p.vx * dt;
   p.y += p.vy * dt;
-  p.x = clamp(p.x, 30, state.w-30);
-  p.y = clamp(p.y, 30, state.h-30);
 
-  // player rotation toward mouse
+  // Keep player in lower portion of the screen
+  const topLimit = state.h * 0.58;   // do not allow moving above this (keep player below)
+  p.x = clamp(p.x, 30, state.w-30);
+  p.y = clamp(p.y, topLimit, state.h-30);
+
+  // player rotation toward mouse, but prefer upward as default
   const mx = state.mouse.x, my = state.mouse.y;
-  const targetAngle = Math.atan2(my - p.y, mx - p.x);
+  const angleToMouse = Math.atan2(my - p.y, mx - p.x);
+  let targetAngle;
+  const dmouse = Math.hypot(mx - p.x, my - p.y);
+
+  // If mouse is close to ship (or pointing downward), prefer upward direction (-PI/2).
+  // Otherwise allow mouse aiming but clamp if it attempts to aim downward (so default direction remains up).
+  if(!state.mouse.moved || dmouse < 22) {
+    targetAngle = -Math.PI/2;
+  } else {
+    // If mouse aims below horizontal (down), we still force an upward bias
+    if(Math.sin(angleToMouse) > 0.2) {
+      targetAngle = -Math.PI/2;
+    } else {
+      targetAngle = angleToMouse;
+    }
+  }
   // smooth rotate
   const diff = normalizeAngle(targetAngle - p.rotation);
   p.rotation += diff * dt * 12;
@@ -392,7 +475,7 @@ function update(dt){
   if((state.mouse.down || keys[' ']) && p.fireCooldown <= 0 && state.energy > 2){
     shootPlayer();
     p.fireCooldown = 120; // ms
-    state.energy = clamp(state.energy - 1, 0, 100);
+    state.energy = clamp(state.energy - 1.2, 0, 100);
   }
   // regenerate energy slowly
   state.energy = clamp(state.energy + dt*6, 0, 100);
@@ -423,34 +506,60 @@ function update(dt){
   state.enemyBullets = state.enemyBullets.filter(b=> b.life>0 && inBounds(b.x,b.y, -40));
   state.particles = state.particles.filter(p2=> p2.life>0);
 
-  // Enemies update
+  // Enemies update (includes entrance animation)
   for(let e of state.enemies){
-    // move toward player
-    const angToPlayer = Math.atan2(p.y - e.y, p.x - e.x);
-    const err = normalizeAngle(angToPlayer - e.rot);
-    e.rot += err * dt * 1.5;
-    // speed slightly varies
-    e.x += e.vx * dt;
-    e.y += e.vy * dt;
+    // entrance animation: y eased from enterFromY -> enterTargetY
+    if(e.entering){
+      const elapsed = now() - e.enterStart;
+      const tProg = clamp(elapsed / e.enterDuration, 0, 1);
+      // ease out cubic
+      const ease = (--(tProg) * tProg * tProg) + 1;
+      // position Y uses eased interpolation (start + (target-start)*ease)
+      e.y = e.enterFromY + (e.enterTargetY - e.enterFromY) * ease;
+      // horizontal drift still applied
+      e.x += e.vx * dt * 0.6;
+      // once entrance done, mark as entered (regular movement resumes)
+      if(now() - e.enterStart >= e.enterDuration) {
+        e.entering = false;
+        // slightly adjust vy after entrance for direct approach toward player's vertical area
+        e.vy = e.vy * (1 + (state.level*0.03));
+      }
+    } else {
+      // after entrance, move toward player but generally downward
+      // desired rotation: angle to player but limited around downward to keep readable "downwards" look
+      const angToPlayer = Math.atan2(state.player.y - e.y, state.player.x - e.x);
+      // limit desired rotation so enemies still generally face down (PI/2)
+      const desired = clampAngleToRange(angToPlayer, Math.PI/2, 0.9);
+      // smooth rotate
+      const err = normalizeAngle(desired - e.rot);
+      e.rot += err * dt * 1.8;
+      // movement: main downward component + horizontal component tuned to face player
+      // ensure vertical velocity is positive
+      const speed = Math.hypot(e.vx, e.vy) || e.vy;
+      // recompute velocity using rotation but with emphasis to downward
+      const moveAngle = e.rot;
+      e.vx = Math.cos(moveAngle) * speed;
+      e.vy = Math.sin(moveAngle) * speed;
+      e.x += e.vx * dt;
+      e.y += e.vy * dt;
+    }
 
     // radar reveal logic
     const d = dist(e.x,e.y,p.x,p.y);
     if(d < p.radarRadius){
       e.revealed = true;
       e.revealUntil = now() + p.revealTime;
-      // subtle glow/pulse
       e.flashing = Math.min(1, (p.revealTime + 300)/1000);
     }
     if(e.revealed && now() > e.revealUntil) e.revealed = false;
 
-    // enemy shooting
-    if(e.shootInterval > 0 && now() - e.lastShot > e.shootInterval * (1 - (state.level*0.04))){
-      // only shoot if roughly facing player / or if revealed
-      if(e.revealed || Math.abs(normalizeAngle(e.rot - angToPlayer)) < 0.9){
+    // enemy shooting (only if not entering)
+    if(!e.entering && e.shootInterval > 0 && now() - e.lastShot > e.shootInterval * (1 - (state.level*0.04))){
+      if(e.revealed || Math.abs(normalizeAngle(e.rot - Math.atan2(state.player.y - e.y, state.player.x - e.x))) < 0.9){
         e.lastShot = now();
-        const speed = 260 + Math.random()*60 + state.level*10;
-        const vx = Math.cos(angToPlayer) * speed;
-        const vy = Math.sin(angToPlayer) * speed;
+        const sp = 260 + Math.random()*60 + state.level*10;
+        const vx = Math.cos(e.rot) * sp;
+        const vy = Math.sin(e.rot) * sp;
         state.enemyBullets.push({
           x: e.x + Math.cos(e.rot)* (e.size*0.6),
           y: e.y + Math.sin(e.rot)* (e.size*0.6),
@@ -480,13 +589,11 @@ function update(dt){
   // Enemy bullets -> player
   for(let b of state.enemyBullets){
     if(dist(b.x,b.y,p.x,p.y) < 26){
-      // hit player
       state.shield -= b.dmg;
       b.life = 0;
       playExplosion();
       spawnHit(b.x,b.y, { color:'#ffb2a0' });
       if(state.shield <= 0){
-        // player destroyed
         gameOver();
       }
     }
@@ -495,7 +602,6 @@ function update(dt){
   // Enemies colliding with player (ram)
   for(let e of state.enemies){
     if(dist(e.x,e.y,p.x,p.y) < e.size*0.4 + p.r*0.7){
-      // collide
       state.shield -= 8;
       e.hp -= 30;
       if(e.hp <= 0) explodeEnemy(e);
@@ -504,15 +610,14 @@ function update(dt){
     }
   }
 
-  // Remove offscreen enemies a bit after leaving
-  state.enemies = state.enemies.filter(e => inBounds(e.x, e.y, 180) && e.hp > -300);
+  // Remove offscreen enemies a bit after leaving bottom
+  state.enemies = state.enemies.filter(e => !(e.y > state.h + 220) && e.hp > -300);
 
-  // Spawn logic & difficulty scaling
+  // Spawn logic & difficulty scaling (only spawn from top now)
   state.spawnTimer -= dt*1000;
   if(state.spawnTimer <= 0){
     spawnEnemy();
-    // adaptive spawn interval
-    state.spawnInterval = clamp(1100 - state.level*40 - Math.min(650, state.score*0.5), 220, 1600);
+    state.spawnInterval = clamp(1100 - state.level*40 - Math.min(650, state.score*0.5), 420, 1600);
     state.spawnTimer = state.spawnInterval * (0.8 + Math.random()*0.6);
   }
   state.difficultyTimer += dt;
@@ -544,11 +649,17 @@ function normalizeAngle(a){
   while(a < -Math.PI) a += Math.PI*2;
   return a;
 }
+function clampAngleToRange(angle, center, span){
+  // returns angle moved toward 'angle' but clamped to center +/- span
+  const diff = normalizeAngle(angle - center);
+  const clamped = clamp(diff, -span, span);
+  return normalizeAngle(center + clamped);
+}
 
 // Shooting
 function shootPlayer(){
   const p = state.player;
-  // create two small shots with slight spread
+  // shot direction is player's rotation (which tends upward)
   const baseAngle = p.rotation;
   for(let off of [-0.02, 0.02]){
     const angle = baseAngle + off;
@@ -601,7 +712,6 @@ function spawnHit(x,y,opts={}){
 
 // Explosion
 function explodeEnemy(e){
-  // big particles based on size
   const pieces = Math.min(80, Math.round(e.size*1.2));
   for(let i=0;i<pieces;i++){
     const a = Math.random()*Math.PI*2;
@@ -616,10 +726,8 @@ function explodeEnemy(e){
       alpha:1
     });
   }
-  // small score + audio
   state.score += e.type==='scout' ? 60 : e.type==='fighter' ? 170 : 620;
   playExplosion();
-  // create small glow object (visual)
   state.enemies = state.enemies.filter(x => x.id !== e.id);
 }
 
@@ -656,30 +764,36 @@ function render(){
   }
   ctx.restore();
 
-  // Draw enemies (if revealed or partially hidden)
+  // Draw enemies (if revealed or partially hidden) - with entrance alpha/scale
   for(let e of state.enemies){
     ctx.save();
     ctx.translate(e.x, e.y);
     ctx.rotate(e.rot);
-    const s = e.size / (e.sprite.width/ (devicePixelRatio>1?1:1));
-    ctx.globalAlpha = e.revealed ? 1 : 0.28;
+    // compute alpha based on entrance progress
+    let alpha = 1;
+    let scale = 1;
+    if(e.entering){
+      const prog = clamp((now() - e.enterStart) / e.enterDuration, 0, 1);
+      alpha = 0.15 + 0.85 * prog;
+      scale = 0.82 + 0.18 * prog;
+    }
+    ctx.globalAlpha = e.revealed ? 1 * alpha : 0.32 * alpha;
     // if revealed, add glow ring
     if(e.revealed){
       ctx.save();
-      ctx.globalAlpha = 0.18;
+      ctx.globalAlpha = 0.18 * alpha;
       ctx.fillStyle = 'rgba(255,120,80,0.12)';
       ctx.beginPath();
       ctx.ellipse(0,0, e.size*1.2, e.size*0.9, 0, 0, Math.PI*2);
       ctx.fill();
       ctx.restore();
     }
-    // draw sprite centered
-    const drawW = e.sprite.width * (e.size / e.sprite.width) * 1.0;
-    const drawH = e.sprite.height * (e.size / e.sprite.width) * 1.0;
+    const drawW = e.sprite.width * (e.size / e.sprite.width) * scale;
+    const drawH = e.sprite.height * (e.size / e.sprite.width) * scale;
     ctx.drawImage(e.sprite, -drawW/2, -drawH/2, drawW, drawH);
-    // HP bar
     ctx.restore();
-    // draw small health above
+
+    // HP bar above enemy
     ctx.save();
     const barW = 44;
     const hx = e.x - barW/2, hy = e.y - e.size*0.7 - 8;
@@ -786,7 +900,7 @@ function drawNebula(){
   ctx.restore();
 }
 
-// Radar drawing
+// Radar drawing - unchanged logic aside from staying consistent with reveal
 function drawRadar(){
   const rctx = radarCtx;
   const s = radarCanvas.width;
@@ -872,9 +986,12 @@ function roundRect(ctx, x, y, width, height, radius, fill, stroke) {
 // Game over
 function gameOver(){
   running = false;
-  document.getElementById('overlay').style.display = 'block';
+  // show overlay with gameover area
+  overlay.style.display = 'block';
   document.getElementById('title').textContent = 'DARKSIDE — LOST';
-  document.getElementById('subtitle').textContent = 'Press R to restart';
+  // show final score in central gameover area
+  gameoverScoreEl.textContent = 'SCORE: ' + String(state.score).padStart(6,'0');
+  gameoverEl.setAttribute('aria-hidden', 'false');
 }
 
 // Restart
@@ -890,15 +1007,16 @@ function restart(){
   state.spawnTimer = 800;
   state.difficultyTimer = 0;
   createPlayer();
-  document.getElementById('overlay').style.display = 'none';
+  overlay.style.display = 'none';
   document.getElementById('title').textContent = 'DARKSIDE';
   document.getElementById('subtitle').textContent = 'A lone ship fights through the dark side...';
+  gameoverEl.setAttribute('aria-hidden', 'true');
   running = true;
   lastTime = now();
-  requestAnimationFrame(loop);
+  // spawn initial waves
+  for(let i=0;i<2;i++) spawnEnemy();
 }
 
-// small helper: distance
-// start initial spawn waves
+// initial spawns so gameplay starts feeling alive after Start
 state.spawnTimer = 500;
-for(let i=0;i<3;i++) spawnEnemy();
+for(let i=0;i<2;i++) spawnEnemy();
