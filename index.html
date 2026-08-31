@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>DARKSIDE — Futuristic Space Shooter</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <!-- HUD / overlay container -->
+  <div id="hud">
+    <div class="hud-row">
+      <div id="score" class="hud-item">SCORE: 000000</div>
+      <div id="shield" class="hud-item">SHIELD: 100%</div>
+    </div>
+
+    <div id="energy" class="hud-bottom">ENERGY: 100%</div>
+
+    <div id="radar-ui">
+      <canvas id="radar" width="200" height="200"></canvas>
+    </div>
+  </div>
+
+  <div id="overlay">
+    <div id="title">DARKSIDE</div>
+    <div id="subtitle">A lone ship fights through the dark side...</div>
+    <div id="controls">
+      Controls: WASD / Arrows to move · Mouse to aim · Left click or Space to shoot · R to restart
+    </div>
+  </div>
+
+  <script type="module" src="game.js"></script>
+</body>
+</html>
